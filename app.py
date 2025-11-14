@@ -7,20 +7,60 @@ app = Flask(__name__)
 # Path to CSV (same folder as this file)
 CSV_PATH = os.path.join(os.path.dirname(__file__), "top10.csv")
 
+
 def load_top10():
+    """
+    Read top10.csv even if it has:
+      - a title row ("Top 10 by YTD Performance")
+      - 'Last refreshed' columns
+      - extra blank columns after YTD %
+    We scan for the row whose first cell is 'Ticker' and
+    then read the next rows as data.
+    """
     rows = []
-    try:
-        with open(CSV_PATH, newline="") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                rows.append(r)
-    except FileNotFoundError:
-        # No data file yet – return empty list
-        pass
+    if not os.path.exists(CSV_PATH):
+        return rows
+
+    with open(CSV_PATH, newline="") as f:
+        reader = csv.reader(f)
+        header_found = False
+        for row in reader:
+            # Skip completely empty rows
+            if not row or all(not cell.strip() for cell in row):
+                continue
+
+            # Find the real header row
+            if not header_found:
+                if row[0].strip().lower() == "ticker":
+                    header_found = True
+                # keep looking until we see 'Ticker'
+                continue
+
+            # After header: actual data rows
+            # Expect at least 4 columns: Ticker, Last Price, Prev Year Close, YTD %
+            if len(row) < 4:
+                continue
+
+            ticker = row[0].strip()
+            last_price = row[1].strip()
+            prev_close = row[2].strip()
+            ytd = row[3].strip()
+
+            if not ticker:
+                continue
+
+            rows.append({
+                "Ticker": ticker,
+                "Last Price": last_price,
+                "Prev Year Close": prev_close,
+                "YTD %": ytd,
+            })
+
     return rows
 
+
 def clean_money(value):
-    """Turn '355.22' or '$355.22' or '1,017.78' into a float."""
+    """Turn '$355.22' or '1,017.78' into a float."""
     if value is None:
         return 0.0
     s = str(value).replace("$", "").replace(",", "").strip()
@@ -29,12 +69,13 @@ def clean_money(value):
     except ValueError:
         return 0.0
 
+
 def format_ytd(value):
     """
     Handle YTD% values like:
-    - '53.22%'  -> 53.22%
-    - '53.22'   -> 53.22%
-    - '0.5322'  -> 53.22%
+      '53.22%'  -> 53.22%
+      '53.22'   -> 53.22%
+      '0.5322'  -> 53.22%
     """
     if value is None:
         return "0.00%"
@@ -43,17 +84,17 @@ def format_ytd(value):
         num = float(s)
     except ValueError:
         return "0.00%"
-
-    # If it's a fraction (0.53), convert to percentage
     if num <= 1:
-        num = num * 100
+        num *= 100
     return f"{num:.2f}%"
+
 
 @app.route("/top10")
 def top10_json():
     """Return data as JSON"""
     rows = load_top10()
     return jsonify(rows)
+
 
 @app.route("/widget")
 def top10_widget():
@@ -135,6 +176,6 @@ def top10_widget():
     """
     return render_template_string(html)
 
-# For local testing; Azure uses gunicorn entry point
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
