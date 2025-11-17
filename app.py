@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request, abort
 import csv
 import os
 
@@ -7,15 +7,18 @@ app = Flask(__name__)
 # Path to CSV (same folder as this file)
 CSV_PATH = os.path.join(os.path.dirname(__file__), "top10.csv")
 
+# Secret key for update endpoint (set in Azure Configuration)
+UPDATE_KEY = os.environ.get("UPDATE_KEY", "")
+
 
 def load_top10():
     """
-    Read top10.csv even if it has:
-      - a title row ("Top 10 by YTD Performance")
-      - 'Last refreshed' columns
-      - extra blank columns after YTD %
-    We scan for the row whose first cell is 'Ticker' and
-    then read the next rows as data.
+    Read top10.csv.
+
+    Handles two formats:
+    1) Clean table: header row starts with 'Ticker'
+    2) Your current export: title row, 'Last refreshed' columns, etc.
+       -> we scan until we find a row whose first cell is 'Ticker'
     """
     rows = []
     if not os.path.exists(CSV_PATH):
@@ -24,37 +27,41 @@ def load_top10():
     with open(CSV_PATH, newline="") as f:
         reader = csv.reader(f)
         header_found = False
+        headers = None
+
         for row in reader:
-            # Skip completely empty rows
+            # Skip empty rows
             if not row or all(not cell.strip() for cell in row):
                 continue
 
-            # Find the real header row
+            first = row[0].strip().lower()
+
             if not header_found:
-                if row[0].strip().lower() == "ticker":
+                # Find the header row ('Ticker')
+                if first == "ticker":
                     header_found = True
-                # keep looking until we see 'Ticker'
+                    headers = row
+                # keep scanning
                 continue
+            else:
+                # After header: data rows
+                if len(row) < 4:
+                    continue
 
-            # After header: actual data rows
-            # Expect at least 4 columns: Ticker, Last Price, Prev Year Close, YTD %
-            if len(row) < 4:
-                continue
+                ticker = row[0].strip()
+                last_price = row[1].strip()
+                prev_close = row[2].strip()
+                ytd = row[3].strip()
 
-            ticker = row[0].strip()
-            last_price = row[1].strip()
-            prev_close = row[2].strip()
-            ytd = row[3].strip()
+                if not ticker:
+                    continue
 
-            if not ticker:
-                continue
-
-            rows.append({
-                "Ticker": ticker,
-                "Last Price": last_price,
-                "Prev Year Close": prev_close,
-                "YTD %": ytd,
-            })
+                rows.append({
+                    "Ticker": ticker,
+                    "Last Price": last_price,
+                    "Prev Year Close": prev_close,
+                    "YTD %": ytd,
+                })
 
     return rows
 
@@ -91,14 +98,14 @@ def format_ytd(value):
 
 @app.route("/top10")
 def top10_json():
-    """Return data as JSON"""
+    """Return data as JSON."""
     rows = load_top10()
     return jsonify(rows)
 
 
 @app.route("/widget")
 def top10_widget():
-    """Return a simple HTML table for embedding"""
+    """Return a simple HTML table for embedding."""
     rows = load_top10()
 
     table_rows = ""
@@ -175,6 +182,35 @@ def top10_widget():
     </html>
     """
     return render_template_string(html)
+
+
+@app.route("/update_top10", methods=["POST"])
+def update_top10():
+    """
+    Called by Power Automate.
+
+    Expects:
+      - URL:  /update_top10?key=YOUR_SECRET
+      - Body: CSV text with a header row.
+        (Either your current export, or a clean 4-column table)
+
+    It overwrites top10.csv on disk.
+    """
+    # Simple shared-secret check
+    if UPDATE_KEY:
+        key = request.args.get("key", "")
+        if key != UPDATE_KEY:
+            abort(401)
+
+    body = request.get_data(as_text=True)
+    if not body.strip():
+        abort(400, "Empty body")
+
+    # Write CSV to disk
+    with open(CSV_PATH, "w", newline="") as f:
+        f.write(body)
+
+    return "OK", 200
 
 
 if __name__ == "__main__":
